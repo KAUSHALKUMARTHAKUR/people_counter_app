@@ -1,6 +1,7 @@
 """
-People Counter - Production-Ready Flask API
-Deploy on Render, Railway, or any Python hosting platform
+People Counter - Memory-Optimized for Free Tier Deployment
+YOLOv8 + DeepSORT
+Production-ready with garbage collection and memory management
 """
 
 from flask import Flask, request, render_template_string, jsonify
@@ -12,18 +13,22 @@ from werkzeug.utils import secure_filename
 import tempfile
 import shutil
 import numpy as np
-import torch
 import logging
 from datetime import datetime
+import gc
+import threading
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for API access
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
+CORS(app)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 
 # HTML Template - Modern UI
@@ -118,6 +123,7 @@ HTML_TEMPLATE = """
             width: 100%;
             transition: transform 0.2s;
             font-weight: bold;
+            margin-top: 15px;
         }
         .btn:hover {
             transform: translateY(-2px);
@@ -247,6 +253,15 @@ HTML_TEMPLATE = """
             margin-top: 8px;
             font-family: monospace;
             overflow-x: auto;
+            word-break: break-all;
+        }
+        .limits {
+            background: #fff3cd;
+            color: #856404;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+            font-size: 0.9em;
         }
     </style>
 </head>
@@ -264,7 +279,7 @@ HTML_TEMPLATE = """
                 <div class="upload-icon">📹</div>
                 <div class="upload-text">Click to select or drag & drop video</div>
                 <div class="upload-text" style="font-size: 0.9em; margin-top: 10px; color: #999;">
-                    Supported: MP4, AVI, MOV (Max 500MB)
+                    Supported: MP4, AVI, MOV
                 </div>
             </div>
             <input type="file" id="videoFile" name="video" accept="video/*" required>
@@ -276,7 +291,7 @@ HTML_TEMPLATE = """
         <div class="loading" id="loading">
             <div class="spinner"></div>
             <p>Processing video with DeepSORT...</p>
-            <p style="font-size: 0.9em; margin-top: 10px; color: #666;">This ensures accurate unique person counting</p>
+            <p style="font-size: 0.9em; margin-top: 10px; color: #666;">This may take 1-2 minutes for optimization</p>
         </div>
 
         <div class="result" id="result">
@@ -298,17 +313,26 @@ HTML_TEMPLATE = """
         <div class="info">
             <div class="info-title">🔍 How it works:</div>
             <ul style="margin-left: 20px; margin-top: 8px;">
-                <li>Uses YOLOv8 for accurate person detection</li>
+                <li>Uses YOLOv8 Nano for accurate person detection</li>
                 <li>DeepSORT assigns unique IDs to each person</li>
                 <li>Tracks people across frames to prevent duplicates</li>
                 <li>High confidence threshold ensures accuracy</li>
             </ul>
         </div>
 
+        <div class="limits">
+            <strong>⚠️ Free Tier Limits:</strong>
+            <ul style="margin-left: 20px; margin-top: 8px;">
+                <li>Maximum video size: 50MB</li>
+                <li>Maximum duration: 60 seconds</li>
+                <li>Processing time: 1-2 minutes (be patient!)</li>
+            </ul>
+        </div>
+
         <div class="api-info">
-            <div class="info-title">📡 API Endpoint:</div>
-            <div class="api-endpoint">POST /api/count</div>
-            <p style="margin-top: 8px;">Send video file with multipart/form-data as "video"</p>
+            <div class="info-title">📡 API Usage:</div>
+            <div class="api-endpoint">POST /api/count<br>Form data: "video" (file)</div>
+            <p style="margin-top: 8px;">Response: {"count": number, "frames_processed": number, "processing_time": seconds}</p>
         </div>
     </div>
 
@@ -327,10 +351,8 @@ HTML_TEMPLATE = """
 
         let startTime = 0;
 
-        // Click to upload
         uploadArea.addEventListener('click', () => fileInput.click());
 
-        // File selection
         fileInput.addEventListener('change', (e) => {
             if (e.target.files.length > 0) {
                 fileName.textContent = `Selected: ${e.target.files[0].name}`;
@@ -340,7 +362,6 @@ HTML_TEMPLATE = """
             }
         });
 
-        // Drag and drop
         uploadArea.addEventListener('dragover', (e) => {
             e.preventDefault();
             uploadArea.classList.add('dragover');
@@ -363,7 +384,6 @@ HTML_TEMPLATE = """
             }
         });
 
-        // Form submission
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             
@@ -385,7 +405,8 @@ HTML_TEMPLATE = """
             try {
                 const response = await fetch('/api/count', {
                     method: 'POST',
-                    body: formData
+                    body: formData,
+                    timeout: 300000  // 5 minute timeout
                 });
 
                 const data = await response.json();
@@ -406,7 +427,7 @@ HTML_TEMPLATE = """
             } catch (error) {
                 loading.classList.remove('show');
                 submitBtn.disabled = false;
-                errorElement.textContent = 'Error processing video. Please try again.';
+                errorElement.textContent = 'Error processing video. Server may be slow. Please try again.';
                 errorElement.classList.add('show');
                 console.error('Error:', error);
             }
@@ -420,8 +441,10 @@ HTML_TEMPLATE = """
 class DeepSORTTracker:
     """
     Simplified DeepSORT tracker for accurate unique person counting
+    Uses appearance features and IoU matching to maintain consistent IDs
+    Optimized for memory efficiency
     """
-    def __init__(self, max_age=30, min_hits=3, iou_threshold=0.3):
+    def __init__(self, max_age=20, min_hits=2, iou_threshold=0.3):
         self.max_age = max_age
         self.min_hits = min_hits
         self.iou_threshold = iou_threshold
@@ -434,7 +457,7 @@ class DeepSORTTracker:
         """Update tracker with new detections"""
         self.frame_count += 1
         
-        # Extract person detections only
+        # Extract person detections only (class 0)
         person_detections = [d for d in detections if int(d[5]) == 0]
         
         if len(person_detections) == 0:
@@ -499,10 +522,12 @@ class DeepSORTTracker:
         roi = frame[y1:y2, x1:x2]
         
         if roi.size == 0:
-            return np.zeros(128)
+            return np.zeros(96)
         
-        roi_resized = cv2.resize(roi, (64, 128))
+        # Resize to smaller size for memory efficiency
+        roi_resized = cv2.resize(roi, (48, 96))
         
+        # Compute color histogram
         hist_b = cv2.calcHist([roi_resized], [0], None, [32], [0, 256])
         hist_g = cv2.calcHist([roi_resized], [1], None, [32], [0, 256])
         hist_r = cv2.calcHist([roi_resized], [2], None, [32], [0, 256])
@@ -552,6 +577,7 @@ class DeepSORTTracker:
                     track_appearance, det_appearance
                 )
                 
+                # Combined cost
                 cost = 0.7 * (1 - iou) + 0.3 * app_dist
                 cost_matrix[i, j] = cost
         
@@ -593,10 +619,11 @@ class DeepSORTTracker:
         return len(self.confirmed_ids)
 
 
-# Load YOLO model
+# Load YOLO model - Nano (optimized for free tier)
 try:
-    logger.info("Loading YOLOv8 model...")
-    model = YOLO('yolov8m.pt')
+    logger.info("Loading YOLOv8 Nano model (memory optimized)...")
+    model = YOLO('yolov8n.pt')  # Smallest model
+    model.fuse()  # Optimize for inference
     logger.info("✓ Model loaded successfully!")
 except Exception as e:
     logger.error(f"Error loading model: {e}")
@@ -609,11 +636,14 @@ def index():
 
 @app.route('/api/count', methods=['POST'])
 def count_people():
-    """API endpoint to count people in uploaded video"""
+    """API endpoint to count people in uploaded video - Memory optimized"""
     start_time = datetime.now()
+    temp_dir = None
     
     try:
-        logger.info("Received video upload request")
+        logger.info("=" * 70)
+        logger.info("NEW REQUEST: Video upload received")
+        logger.info("=" * 70)
         
         if 'video' not in request.files:
             return jsonify({'error': 'No video file provided'}), 400
@@ -623,32 +653,46 @@ def count_people():
         if video_file.filename == '':
             return jsonify({'error': 'No video selected'}), 400
         
-        # Save uploaded video temporarily
         filename = secure_filename(video_file.filename)
         temp_dir = tempfile.mkdtemp()
         video_path = os.path.join(temp_dir, filename)
         video_file.save(video_path)
         
-        logger.info(f"Processing video: {filename}")
+        # Check file size
+        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        if file_size_mb > 50:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            logger.warning(f"Video too large: {file_size_mb:.2f}MB > 50MB")
+            return jsonify({'error': f'Video too large ({file_size_mb:.2f}MB). Max 50MB on free tier'}), 400
+        
+        logger.info(f"Processing video: {filename} ({file_size_mb:.2f}MB)")
         
         try:
-            # Open video
             cap = cv2.VideoCapture(video_path)
             
             if not cap.isOpened():
                 return jsonify({'error': 'Could not open video file'}), 400
             
-            # Initialize DeepSORT tracker
-            tracker = DeepSORTTracker(
-                max_age=30,
-                min_hits=3,
-                iou_threshold=0.3
-            )
+            # Get video info
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = total_frames / fps if fps > 0 else 0
+            
+            logger.info(f"Video info: {total_frames} frames, {duration:.1f}s, {fps:.2f} fps")
+            
+            if duration > 60:  # Max 1 minute
+                cap.release()
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                logger.warning(f"Video too long: {duration:.1f}s > 60s")
+                return jsonify({'error': f'Video too long ({duration:.1f}s). Max 60 seconds on free tier'}), 400
+            
+            # Initialize tracker with optimized settings
+            tracker = DeepSORTTracker(max_age=20, min_hits=2, iou_threshold=0.3)
             
             frame_count = 0
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            processed_frames = 0
             
-            logger.info(f"Video has {total_frames} total frames")
+            logger.info("Starting video processing...")
             
             # Process video frame by frame
             while cap.isOpened():
@@ -659,12 +703,17 @@ def count_people():
                 
                 frame_count += 1
                 
-                # Process every 3rd frame
-                if frame_count % 3 != 0:
+                # Process every 5th frame (reduce memory and speed up)
+                if frame_count % 5 != 0:
                     continue
                 
-                # Run YOLOv8 detection
-                results = model(frame, verbose=False, conf=0.5)
+                processed_frames += 1
+                
+                # Resize frame to 640x480 (memory optimization)
+                frame = cv2.resize(frame, (640, 480))
+                
+                # Run detection with lower resource usage
+                results = model(frame, verbose=False, conf=0.55, imgsz=640)
                 
                 # Extract detections
                 detections = []
@@ -681,51 +730,77 @@ def count_people():
                 # Update tracker
                 tracker.update(detections, frame)
                 
-                if frame_count % 30 == 0:
+                # Force garbage collection every 25 processed frames
+                if processed_frames % 25 == 0:
+                    gc.collect()
                     current_count = tracker.get_unique_count()
+                    elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info(f"Progress: {frame_count}/{total_frames} frames | "
-                              f"Unique people: {current_count}")
+                              f"Processed: {processed_frames} | Count: {current_count} | "
+                              f"Time: {elapsed:.1f}s")
             
             cap.release()
+            gc.collect()  # Final cleanup
             
             # Clean up temporary files
             shutil.rmtree(temp_dir, ignore_errors=True)
+            temp_dir = None
             
             people_count = tracker.get_unique_count()
             elapsed_time = (datetime.now() - start_time).total_seconds()
             
-            logger.info(f"✓ Final count: {people_count} unique people | "
-                       f"Time: {elapsed_time:.2f}s")
+            logger.info("=" * 70)
+            logger.info(f"✓ RESULT: {people_count} unique people detected")
+            logger.info(f"✓ Frames processed: {processed_frames}/{frame_count}")
+            logger.info(f"✓ Total time: {elapsed_time:.2f}s")
+            logger.info("=" * 70)
             
             return jsonify({
                 'count': people_count,
-                'frames_processed': frame_count,
+                'frames_processed': processed_frames,
                 'processing_time': round(elapsed_time, 2)
             })
         
         except Exception as e:
-            if os.path.exists(temp_dir):
+            if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
+            logger.error(f"Error during processing: {str(e)}", exc_info=True)
             raise e
     
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        return jsonify({'error': f'Error processing video: {str(e)}'}), 500
+        logger.error(f"ERROR: {str(e)}", exc_info=True)
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({'error': f'Error: {str(e)}'}), 500
+    
+    finally:
+        gc.collect()
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'service': 'People Counter API'})
+    return jsonify({
+        'status': 'healthy',
+        'service': 'People Counter API',
+        'tier': 'free',
+        'limits': {
+            'max_video_size_mb': 50,
+            'max_duration_seconds': 60
+        }
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_ENV') == 'development'
     
     logger.info("\n" + "="*70)
-    logger.info("People Counter API - YOLOv8 + DeepSORT")
+    logger.info("🎥 People Counter API - YOLOv8 + DeepSORT")
     logger.info("="*70)
-    logger.info(f"\nStarting server on port {port}...")
-    logger.info("Open http://127.0.0.1:5000 in your browser")
-    logger.info("="*70 + "\n")
+    logger.info(f"\n✓ Mode: {'Development' if debug else 'Production'}")
+    logger.info(f"✓ Port: {port}")
+    logger.info(f"✓ Model: YOLOv8 Nano (optimized)")
+    logger.info(f"✓ Max video: 50MB / 60 seconds")
+    logger.info(f"✓ Free tier deployment ready")
+    logger.info("\n" + "="*70 + "\n")
     
-    app.run(debug=debug, host='0.0.0.0', port=port)
+    app.run(debug=debug, host='0.0.0.0', port=port, threaded=True)
